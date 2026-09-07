@@ -1,0 +1,111 @@
+name: Daily calendar sync
+on:
+  # 05:00 UTC weekdays = 06:00 UK during BST, 05:00 UK during GMT.
+  # Adjust as needed after DST transitions.
+  schedule:
+    - cron: "0 5 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Only run N companies (blank = all)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Skip Slack + no commit"
+        required: false
+        default: "false"
+        type: boolean
+
+concurrency:
+  group: calendar-sync-daily
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Restore 9fin session cookies
+        env:
+          NINEFIN_STATE_B64: ${{ secrets.NINEFIN_STATE_B64 }}
+        run: |
+          mkdir -p state
+          if [ -z "$NINEFIN_STATE_B64" ]; then
+            echo "::error::NINEFIN_STATE_B64 secret is empty. Run scripts/refresh_state.sh locally and upload."
+            exit 1
+          fi
+          echo "$NINEFIN_STATE_B64" | base64 --decode > state/9fin_state.json
+          test -s state/9fin_state.json
+
+      - name: Run calendar sync
+        env:
+          OMNI_API_KEY: ${{ secrets.OMNI_API_KEY }}
+          OMNI_MODEL_ID: ${{ secrets.OMNI_MODEL_ID }}
+          OMNI_BASE_URL: ${{ secrets.OMNI_BASE_URL }}
+          MONDAY_API_TOKEN: ${{ secrets.MONDAY_API_TOKEN }}
+          NMD_BOARD_ID: ${{ secrets.NMD_BOARD_ID }}
+          NINEFIN_EMAIL: ${{ secrets.NINEFIN_EMAIL }}
+          NINEFIN_PASSWORD: ${{ secrets.NINEFIN_PASSWORD }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_TARGET_EMAIL: ${{ secrets.SLACK_TARGET_EMAIL }}
+          LOOKAHEAD_DAYS: ${{ vars.LOOKAHEAD_DAYS || '90' }}
+          IR_SCRAPE_CONCURRENCY: "6"
+          IR_SCRAPE_TIMEOUT_S: "20"
+          LOG_LEVEL: "INFO"
+        run: |
+          LIMIT_ARG=""
+          if [ -n "${{ github.event.inputs.limit }}" ]; then
+            LIMIT_ARG="--limit ${{ github.event.inputs.limit }}"
+          fi
+          DRY_ARG=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            DRY_ARG="--dry-run"
+          fi
+          python -m calendar_sync.main $LIMIT_ARG $DRY_ARG
+
+      - name: Publish gaps.json to repo
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          test -f dashboards/gaps.json
+          git config user.name "calendar-sync-bot"
+          git config user.email "calendar-sync-bot@users.noreply.github.com"
+          git add dashboards/gaps.json dashboards/latest.html dashboards/*.html || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "calendar-sync: $(date -u +%Y-%m-%dT%H:%M:%SZ) [run $RUN_ID]"
+            git push
+          fi
+
+      - name: Upload run log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-log-${{ github.run_id }}
+          path: |
+            logs/last_run.md
+            logs/*.log
+          if-no-files-found: ignore
+          retention-days: 30
