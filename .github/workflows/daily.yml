@@ -54,8 +54,16 @@ jobs:
             echo "::error::NINEFIN_STATE_B64 secret is empty. Run scripts/refresh_state.sh locally and upload."
             exit 1
           fi
-          # Tolerate any whitespace/newlines that snuck into the secret
-          printf '%s' "$NINEFIN_STATE_B64" | tr -d ' \r\n\t' | base64 --decode > state/9fin_state.json
+          # Debug: report input shape without leaking content
+          LEN=$(printf '%s' "$NINEFIN_STATE_B64" | wc -c | tr -d ' ')
+          echo "Raw secret length: $LEN"
+          echo "After whitespace-strip length: $(printf '%s' "$NINEFIN_STATE_B64" | tr -d ' \r\n\t' | wc -c | tr -d ' ')"
+          # First 8 and last 8 chars of the raw secret (safe: base64 alphabet only)
+          echo "First 8 chars: $(printf '%s' "$NINEFIN_STATE_B64" | head -c 8)"
+          echo "Last 8 chars: $(printf '%s' "$NINEFIN_STATE_B64" | tail -c 8)"
+          # Decode with -i (ignore garbage) as a fallback
+          printf '%s' "$NINEFIN_STATE_B64" | tr -d ' \r\n\t' | base64 -di > state/9fin_state.json
+          echo "Decoded file size: $(wc -c < state/9fin_state.json)"
           test -s state/9fin_state.json
 
       - name: Run calendar sync
