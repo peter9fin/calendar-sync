@@ -15,7 +15,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from playwright.sync_api import BrowserContext
 
@@ -683,26 +683,35 @@ def scrape_many(
     lookahead_days: int,
     timeout_s: int,
     concurrency: int = 1,
-) -> List[IRPageResult]:
+) -> Dict[str, IRPageResult]:
     """Scrape a batch of companies serially in a shared browser context.
 
-    `companies` is a list of dicts with keys: company_id, street_name, ir_url.
+    `companies` is a list of dicts. Each dict must carry an IR URL and a company
+    identifier / display name — either as ``id``/``name`` (the shape used by
+    ``main.py``'s joined rows) or as ``company_id``/``street_name``. Returns a
+    dict keyed by that identifier so callers can look results up by row id.
     """
     if concurrency != 1:
         log.info("IR scrape: concurrency=%d requested, running serial (sync Playwright)", concurrency)
 
-    results: List[IRPageResult] = []
+    results: Dict[str, IRPageResult] = {}
     total = len(companies)
     for i, c in enumerate(companies, start=1):
+        cid = str(c.get("id") or c.get("company_id") or "").strip()
+        name = str(c.get("name") or c.get("street_name") or "").strip()
+        ir_url = c.get("ir_url") or ""
+        if not cid or not ir_url:
+            log.warning("IR scrape: skipping row with missing id/ir_url: %r", c)
+            continue
         r = scrape_one(
             context,
-            c["company_id"],
-            c["street_name"],
-            c["ir_url"],
+            cid,
+            name,
+            ir_url,
             lookahead_days,
             timeout_s,
         )
-        results.append(r)
+        results[cid] = r
         if i % 10 == 0 or i == total or r.error:
             log.info(
                 "IR scrape progress: %d/%d (last: %s, events=%d, err=%s)",

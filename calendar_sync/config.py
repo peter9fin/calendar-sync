@@ -24,6 +24,22 @@ def _int(name: str, default: int) -> int:
     return int(raw) if raw else default
 
 
+def _url(name: str, default: str) -> str:
+    """Read a URL-typed env var. Strips whitespace, falls back to default when
+    empty, and defensively prepends https:// if the caller supplied a bare host
+    (a common GitHub-secrets footgun that manifests as
+    ``Invalid URL '.../api': No scheme supplied``).
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        raw = default
+    if not raw:
+        raise RuntimeError(f"Missing required URL env var: {name}")
+    if "://" not in raw:
+        raw = "https://" + raw.lstrip("/")
+    return raw.rstrip("/")
+
+
 @dataclass(frozen=True)
 class Config:
     # Omni
@@ -66,13 +82,13 @@ class Config:
 
         return cls(
             omni_api_key=_required("OMNI_API_KEY"),
-            omni_base_url=os.environ.get("OMNI_BASE_URL", "https://9fin.omniapp.co").rstrip("/"),
+            omni_base_url=_url("OMNI_BASE_URL", "https://9fin.omniapp.co"),
             omni_model_id=_required("OMNI_MODEL_ID"),
             monday_api_token=_required("MONDAY_API_TOKEN"),
             nmd_board_id=_int("NMD_BOARD_ID", 5099036324),
             ninefin_email=_required("NINEFIN_EMAIL"),
             ninefin_password=_required("NINEFIN_PASSWORD"),
-            ninefin_base_url=os.environ.get("NINEFIN_BASE_URL", "https://app.9fin.com").rstrip("/"),
+            ninefin_base_url=_url("NINEFIN_BASE_URL", "https://app.9fin.com"),
             slack_bot_token=_required("SLACK_BOT_TOKEN"),
             slack_target_email=_required("SLACK_TARGET_EMAIL"),
             lookahead_days=_int("LOOKAHEAD_DAYS", 90),
