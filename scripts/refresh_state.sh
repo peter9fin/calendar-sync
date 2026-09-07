@@ -29,6 +29,6 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 echo "Uploading NINEFIN_STATE_B64 to the GitHub repo…"
-base64 -i state/9fin_state.json | gh secret set NINEFIN_STATE_B64 --body -
+base64 -i state/9fin_state.json | tr -d '\n' | gh secret set NINEFIN_STATE_B64 --body -
 
 echo "Done. Session cookies pushed. The next scheduled run should have a fresh session."

@@ -54,7 +54,8 @@ jobs:
             echo "::error::NINEFIN_STATE_B64 secret is empty. Run scripts/refresh_state.sh locally and upload."
             exit 1
           fi
-          echo "$NINEFIN_STATE_B64" | base64 --decode > state/9fin_state.json
+          # Tolerate any whitespace/newlines that snuck into the secret
+          printf '%s' "$NINEFIN_STATE_B64" | tr -d ' \r\n\t' | base64 --decode > state/9fin_state.json
           test -s state/9fin_state.json
 
       - name: Run calendar sync
