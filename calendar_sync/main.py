@@ -23,7 +23,7 @@ from .logic.normalise import normalise
 from .notify.slack import send_abort, send_report
 from .render.gaps_json import write_gaps_json
 from .sources.ir_scraper import scrape_many
-from .sources.monday_client import fetch_nmd_core_rows
+from .sources.monday_client import fetch_nmd_rows
 from .sources.ninefin_client import NineFinSessionError, fetch_calendar, load_context
 from .sources.omni_client import fetch_core_companies
 
@@ -39,22 +39,40 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _join_core_and_nmd(core, nmd_by_id):
-    """Inner-join Omni core companies with the NMD board rows (must have IR URL)."""
-    joined = []
-    for c in core:
-        row = nmd_by_id.get(str(c.company_id))
-        if not row:
-            continue
+def _join_core_and_nmd(core, nmd_rows):
+    """Inner-join Omni core companies with the NMD board rows.
+
+    NMD rows don't reliably carry a company_id, so we join by street_name
+    (case-insensitive, whitespace-trimmed). Only NMD rows flagged as core
+    on Monday AND matching an Omni core company survive.
+    """
+    core_nmd = {}
+    for row in nmd_rows:
+        if not row.core:
+            continue  # NMD's own core flag must be set
         if not row.ir_url:
             continue
+        key = (row.street_name or "").strip().lower()
+        if key:
+            core_nmd[key] = row
+
+    joined = []
+    seen = set()
+    for c in core:
+        key = (c.street_name or "").strip().lower()
+        if key in seen:
+            continue
+        row = core_nmd.get(key)
+        if not row:
+            continue
+        seen.add(key)
         joined.append({
             "id": str(c.company_id),
             "name": row.street_name or c.street_name,
             "ir_url": row.ir_url,
-            "analyst": row.analyst or "",
-            "region": row.region or "",
-            "country": row.country or "",
+            "analyst": row.associate or "",
+            "region": row.office or "",
+            "country": "",
             "hosts_calls": row.hosts_calls or "",
             "monday_item_id": row.monday_item_id or "",
             "monday_core": c.monday_core,
@@ -87,16 +105,16 @@ def run(cfg: Config, args: argparse.Namespace) -> int:
 
     # --- 2. Monday NMD board ------------------------------------------------
     try:
-        nmd_by_id = fetch_nmd_core_rows(cfg.monday_api_token, cfg.nmd_board_id)
+        nmd_rows = fetch_nmd_rows(cfg.monday_api_token, cfg.nmd_board_id)
     except Exception as e:
         log.exception("Monday fetch failed")
         if not args.dry_run:
             send_abort(cfg, f"Monday fetch failed: {e}")
         return 3
-    log.info("Monday returned %d NMD core rows", len(nmd_by_id))
+    log.info("Monday returned %d NMD rows with an IR URL", len(nmd_rows))
 
     # --- 3. Join ------------------------------------------------------------
-    joined = _join_core_and_nmd(core, nmd_by_id)
+    joined = _join_core_and_nmd(core, nmd_rows)
     log.info("Joined: %d core companies with IR URL", len(joined))
 
     if args.only_ids:

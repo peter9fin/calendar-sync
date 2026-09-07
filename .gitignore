@@ -6,3 +6,4 @@ state/
 logs/
 .DS_Store
 .pytest_cache/
+state/9fin_state.b64
