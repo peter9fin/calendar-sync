@@ -190,13 +190,23 @@ def run(cfg: Config, args: argparse.Namespace) -> int:
             row["on_9fin"] = [{"d": e["date"].isoformat() if hasattr(e["date"], "isoformat") else e["date"], "t": e["title"]} for e in ninefin]
             continue
         gaps = find_gaps(ir.events, ninefin)
-        row["status"] = "to-check" if gaps else "cleared"
+        if gaps:
+            row["status"] = "to-check"
+        elif not ir.events:
+            row["status"] = "no-dates"
+        else:
+            row["status"] = "cleared"
         row["to_file"] = [e["date"].isoformat() if hasattr(e["date"], "isoformat") else e["date"] for e in gaps]
         row["on_9fin"] = [{"d": e["date"].isoformat() if hasattr(e["date"], "isoformat") else e["date"], "t": e["title"]} for e in ninefin]
 
     gap_rows = [r for r in joined if r["status"] == "to-check"]
     fail_rows = [r for r in joined if r["status"] == "urlbroken"]
-    log.info("Diff complete: %d gaps, %d URL failures, %d clean", len(gap_rows), len(fail_rows), len(joined) - len(gap_rows) - len(fail_rows))
+    nodate_rows = [r for r in joined if r["status"] == "no-dates"]
+    cleared_rows = [r for r in joined if r["status"] == "cleared"]
+    log.info(
+        "Diff complete: %d gaps, %d URL failures, %d no-dates (page parsed, 0 future dates), %d cleared (dates matched 9fin)",
+        len(gap_rows), len(fail_rows), len(nodate_rows), len(cleared_rows),
+    )
 
     # --- 6. Write gaps.json for the artifact -------------------------------
     write_gaps_json(joined, cfg.repo_root, today)
