@@ -116,5 +116,6 @@ jobs:
           path: |
             logs/last_run.md
             logs/*.log
+            dashboards/gaps.json
           if-no-files-found: ignore
           retention-days: 30
