@@ -27,6 +27,7 @@ from .sources.ir_scraper_async import scrape_many_async
 from .sources.monday_client import fetch_nmd_rows
 from .sources.ninefin_client import NineFinSessionError, fetch_calendar, load_context
 from .sources.omni_client import fetch_core_companies
+from .sources.sec_client import fetch_sec_events, load_sec_ticker_index, match_ciks
 
 log = logging.getLogger("calendar_sync")
 
@@ -161,10 +162,11 @@ def run(cfg: Config, args: argparse.Namespace) -> int:
 
         context.close()
 
+    import asyncio
+
     if args.skip_ir_scrape:
         ir_results = {}
     else:
-        import asyncio
         # Adapt joined-row keys (id/name) to the async scraper's expected keys.
         async_input = [
             {"company_id": r["id"], "street_name": r["name"], "ir_url": r["ir_url"]}
@@ -180,22 +182,56 @@ def run(cfg: Config, args: argparse.Namespace) -> int:
         ))
         ir_results = {r.company_id: r for r in async_out}
 
+    # --- 4b. SEC EDGAR (secondary source) -----------------------------------
+    sec_events_by_company: dict = {}
+    try:
+        sec_index = load_sec_ticker_index(cfg.state_dir / "sec_tickers.json")
+        ciks_by_company = match_ciks(joined, sec_index)
+        log.info("SEC: matched %d/%d companies to CIKs", len(ciks_by_company), len(joined))
+        if ciks_by_company:
+            horizon = today + dt.timedelta(days=cfg.lookahead_days)
+            sec_events_by_company = asyncio.run(fetch_sec_events(
+                ciks_by_company, today, horizon, lookback_days=90, concurrency=8,
+            ))
+            n_with_events = sum(1 for v in sec_events_by_company.values() if v)
+            log.info("SEC: extracted events for %d/%d matched companies",
+                     n_with_events, len(ciks_by_company))
+    except Exception as e:
+        log.warning("SEC layer failed (continuing without): %s", e)
+
     # --- 5. Diff per company ------------------------------------------------
+    ir_only = sec_only = both_sources = 0
     for row in joined:
         ir = ir_results.get(row["id"])
         ninefin = _events_for_company(row["name"], ninefin_events)
+        sec_events = sec_events_by_company.get(str(row["id"]), [])
+        row["sec_events"] = len(sec_events)
+        row["ir_events"] = 0 if (ir is None or ir.error) else len(ir.events)
+
+        # Merge IR + SEC into a combined event list for gap detection.
         if ir is None or ir.error:
-            row["status"] = "urlbroken"
-            row["to_file"] = []
-            row["on_9fin"] = [{"d": e["date"].isoformat() if hasattr(e["date"], "isoformat") else e["date"], "t": e["title"]} for e in ninefin]
-            continue
-        gaps = find_gaps(ir.events, ninefin)
+            combined = list(sec_events)
+            ir_broken = True
+        else:
+            combined = list(ir.events) + list(sec_events)
+            ir_broken = False
+
+        gaps = find_gaps(combined, ninefin)
         if gaps:
             row["status"] = "to-check"
-        elif not ir.events:
-            row["status"] = "no-dates"
+        elif not combined:
+            row["status"] = "urlbroken" if ir_broken else "no-dates"
         else:
             row["status"] = "cleared"
+
+        # Source attribution for measuring the SEC lift.
+        if row["ir_events"] and row["sec_events"]:
+            both_sources += 1
+        elif row["sec_events"] and not row["ir_events"]:
+            sec_only += 1
+        elif row["ir_events"]:
+            ir_only += 1
+
         row["to_file"] = [e["date"].isoformat() if hasattr(e["date"], "isoformat") else e["date"] for e in gaps]
         row["on_9fin"] = [{"d": e["date"].isoformat() if hasattr(e["date"], "isoformat") else e["date"], "t": e["title"]} for e in ninefin]
 
@@ -204,8 +240,12 @@ def run(cfg: Config, args: argparse.Namespace) -> int:
     nodate_rows = [r for r in joined if r["status"] == "no-dates"]
     cleared_rows = [r for r in joined if r["status"] == "cleared"]
     log.info(
-        "Diff complete: %d gaps, %d URL failures, %d no-dates (page parsed, 0 future dates), %d cleared (dates matched 9fin)",
+        "Diff complete: %d gaps, %d URL failures, %d no-dates, %d cleared",
         len(gap_rows), len(fail_rows), len(nodate_rows), len(cleared_rows),
+    )
+    log.info(
+        "Source coverage: %d IR-only, %d SEC-only, %d both (SEC lifted %d companies from silence)",
+        ir_only, sec_only, both_sources, sec_only,
     )
 
     # --- 6. Write gaps.json for the artifact -------------------------------
