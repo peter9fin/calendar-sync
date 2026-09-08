@@ -26,7 +26,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,7 +78,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_TARGET_EMAIL: ${{ secrets.SLACK_TARGET_EMAIL }}
           LOOKAHEAD_DAYS: ${{ vars.LOOKAHEAD_DAYS || '90' }}
-          IR_SCRAPE_CONCURRENCY: "6"
+          IR_SCRAPE_CONCURRENCY: "10"
           IR_SCRAPE_TIMEOUT_S: "20"
           LOG_LEVEL: "INFO"
         run: |

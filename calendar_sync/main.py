@@ -22,7 +22,8 @@ from .logic.diff import find_gaps
 from .logic.normalise import normalise
 from .notify.slack import send_abort, send_report
 from .render.gaps_json import write_gaps_json
-from .sources.ir_scraper import scrape_many
+from .sources.ir_scraper import scrape_many  # noqa: F401 (kept for backwards compat)
+from .sources.ir_scraper_async import scrape_many_async
 from .sources.monday_client import fetch_nmd_rows
 from .sources.ninefin_client import NineFinSessionError, fetch_calendar, load_context
 from .sources.omni_client import fetch_core_companies
@@ -158,18 +159,26 @@ def run(cfg: Config, args: argparse.Namespace) -> int:
             return 6
         log.info("9fin returned %d events across %d companies", len(ninefin_events), len({e.company for e in ninefin_events}))
 
-        if args.skip_ir_scrape:
-            ir_results = {}
-        else:
-            ir_results = scrape_many(
-                context,
-                joined,
-                lookahead_days=cfg.lookahead_days,
-                timeout_s=cfg.ir_scrape_timeout_s,
-                concurrency=cfg.ir_scrape_concurrency,
-            )
-
         context.close()
+
+    if args.skip_ir_scrape:
+        ir_results = {}
+    else:
+        import asyncio
+        # Adapt joined-row keys (id/name) to the async scraper's expected keys.
+        async_input = [
+            {"company_id": r["id"], "street_name": r["name"], "ir_url": r["ir_url"]}
+            for r in joined
+        ]
+        async_out = asyncio.run(scrape_many_async(
+            async_input,
+            lookahead_days=cfg.lookahead_days,
+            timeout_s=cfg.ir_scrape_timeout_s,
+            concurrency=max(cfg.ir_scrape_concurrency, 8),
+            use_llm=False,
+            progress_every=25,
+        ))
+        ir_results = {r.company_id: r for r in async_out}
 
     # --- 5. Diff per company ------------------------------------------------
     for row in joined:
