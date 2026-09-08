@@ -1,6 +1,7 @@
 playwright==1.47.0
 python-dotenv==1.0.1
 requests==2.32.3
+aiohttp==3.10.10
 openpyxl==3.1.5
 slack-sdk==3.33.1
 pyarrow==17.0.0
