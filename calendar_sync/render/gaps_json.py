@@ -60,11 +60,13 @@ def _normalise(d: dict) -> dict:
 
 
 def _counts(rows: list[dict]) -> dict:
-    c = {"to-check": 0, "changed": 0, "cleared": 0, "no-dates": 0, "urlbroken": 0, "candidate": 0, "all": len(rows)}
+    c = {"to-check": 0, "changed": 0, "cleared": 0, "no-dates": 0,
+         "urlbroken": 0, "needs_fix": 0, "orphan": 0,
+         "candidate": 0, "all": len(rows)}
     for r in rows:
         s = r["status"]
         if s in c:
             c[s] = c.get(s, 0) + 1
-        if r["toFile"] and s not in ("cleared", "urlbroken", "no-dates"):
+        if r["toFile"] and s not in ("cleared", "urlbroken", "no-dates", "needs_fix", "orphan"):
             c["candidate"] += 1
     return c

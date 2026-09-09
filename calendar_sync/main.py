@@ -27,6 +27,7 @@ from .sources.ir_scraper_async import scrape_many_async
 from .sources.monday_client import fetch_nmd_rows
 from .sources.ninefin_client import NineFinSessionError, fetch_calendar, load_context
 from .sources.omni_client import fetch_core_companies
+from .sources.dispatcher import assign, load_source_registry
 from .sources.sec_client import fetch_sec_events, load_sec_ticker_index, match_ciks
 
 log = logging.getLogger("calendar_sync")
@@ -163,14 +164,30 @@ def run(cfg: Config, args: argparse.Namespace) -> int:
         context.close()
 
     import asyncio
+    from collections import Counter
 
+    # --- 4a. Source assignment (one source per company) ---------------------
+    registry = load_source_registry(cfg.repo_root / "dashboards" / "url_audit.csv")
+    for row in joined:
+        row["_source"] = assign(registry, row["id"], row["ir_url"])
+    source_hist = Counter(r["_source"]["source_type"] for r in joined)
+    log.info("Source assignment: %s", dict(source_hist))
+    log.info("Automated coverage: %d / %d (orphan + needs_fix = %d)",
+             sum(v for k, v in source_hist.items() if k not in ("orphan", "needs_fix")),
+             len(joined),
+             source_hist.get("orphan", 0) + source_hist.get("needs_fix", 0))
+
+    # --- 4b. IR scrape — only for companies assigned ir_calendar_page --------
     if args.skip_ir_scrape:
         ir_results = {}
     else:
-        # Adapt joined-row keys (id/name) to the async scraper's expected keys.
+        ir_targets = [r for r in joined if r["_source"]["source_type"] == "ir_calendar_page"]
+        log.info("IR scrape: %d companies (skipping %d assigned to structured sources / orphan / needs_fix)",
+                 len(ir_targets), len(joined) - len(ir_targets))
         async_input = [
-            {"company_id": r["id"], "street_name": r["name"], "ir_url": r["ir_url"]}
-            for r in joined
+            {"company_id": r["id"], "street_name": r["name"],
+             "ir_url": r["_source"]["source_id"] or r["ir_url"]}
+            for r in ir_targets
         ]
         async_out = asyncio.run(scrape_many_async(
             async_input,
@@ -182,13 +199,14 @@ def run(cfg: Config, args: argparse.Namespace) -> int:
         ))
         ir_results = {r.company_id: r for r in async_out}
 
-    # --- 4b. SEC EDGAR (secondary source) -----------------------------------
+    # --- 4c. SEC EDGAR — only for companies assigned sec ---------------------
     sec_events_by_company: dict = {}
-    try:
-        sec_index = load_sec_ticker_index(cfg.state_dir / "sec_tickers.json")
-        ciks_by_company = match_ciks(joined, sec_index)
-        log.info("SEC: matched %d/%d companies to CIKs", len(ciks_by_company), len(joined))
-        if ciks_by_company:
+    sec_targets = [r for r in joined if r["_source"]["source_type"] == "sec"
+                   and r["_source"]["source_id"]]
+    if sec_targets:
+        try:
+            ciks_by_company = {str(r["id"]): r["_source"]["source_id"] for r in sec_targets}
+            log.info("SEC: polling %d companies", len(ciks_by_company))
             horizon = today + dt.timedelta(days=cfg.lookahead_days)
             sec_events_by_company = asyncio.run(fetch_sec_events(
                 ciks_by_company, today, horizon, lookback_days=90, concurrency=8,
@@ -196,57 +214,54 @@ def run(cfg: Config, args: argparse.Namespace) -> int:
             n_with_events = sum(1 for v in sec_events_by_company.values() if v)
             log.info("SEC: extracted events for %d/%d matched companies",
                      n_with_events, len(ciks_by_company))
-    except Exception as e:
-        log.warning("SEC layer failed (continuing without): %s", e)
+        except Exception as e:
+            log.warning("SEC layer failed (continuing without): %s", e)
 
-    # --- 5. Diff per company ------------------------------------------------
-    ir_only = sec_only = both_sources = 0
+    # --- 5. Diff per company (dispatched from _source) ----------------------
+    stype_hits = Counter()
     for row in joined:
-        ir = ir_results.get(row["id"])
+        stype = row["_source"]["source_type"]
         ninefin = _events_for_company(row["name"], ninefin_events)
-        sec_events = sec_events_by_company.get(str(row["id"]), [])
-        row["sec_events"] = len(sec_events)
-        row["ir_events"] = 0 if (ir is None or ir.error) else len(ir.events)
 
-        # Merge IR + SEC into a combined event list for gap detection.
-        if ir is None or ir.error:
-            combined = list(sec_events)
-            ir_broken = True
-        else:
-            combined = list(ir.events) + list(sec_events)
-            ir_broken = False
+        # Collect events from the ONE assigned source for this company.
+        events: list = []
+        ir_broken = False
+        if stype == "sec":
+            events = list(sec_events_by_company.get(str(row["id"]), []))
+        elif stype == "ir_calendar_page":
+            ir = ir_results.get(row["id"])
+            if ir is None or ir.error:
+                ir_broken = True
+            else:
+                events = list(ir.events)
+        # rss / ical / jsonld / needs_fix / orphan → no fetcher yet → events = []
 
-        gaps = find_gaps(combined, ninefin)
+        row["source_type"] = stype
+        row["source_events"] = len(events)
+        if events:
+            stype_hits[stype] += 1
+
+        gaps = find_gaps(events, ninefin)
         if gaps:
             row["status"] = "to-check"
-        elif not combined:
-            row["status"] = "urlbroken" if ir_broken else "no-dates"
-        else:
+        elif events:
             row["status"] = "cleared"
-
-        # Source attribution for measuring the SEC lift.
-        if row["ir_events"] and row["sec_events"]:
-            both_sources += 1
-        elif row["sec_events"] and not row["ir_events"]:
-            sec_only += 1
-        elif row["ir_events"]:
-            ir_only += 1
+        elif stype == "ir_calendar_page" and ir_broken:
+            row["status"] = "urlbroken"
+        elif stype in ("needs_fix", "orphan"):
+            row["status"] = stype  # dashboard treats these as their own bucket
+        else:
+            row["status"] = "no-dates"
 
         row["to_file"] = [e["date"].isoformat() if hasattr(e["date"], "isoformat") else e["date"] for e in gaps]
         row["on_9fin"] = [{"d": e["date"].isoformat() if hasattr(e["date"], "isoformat") else e["date"], "t": e["title"]} for e in ninefin]
 
+    log.info("Signal per source: %s", dict(stype_hits))
+
+    status_hist = Counter(r["status"] for r in joined)
+    log.info("Status breakdown: %s", dict(status_hist))
     gap_rows = [r for r in joined if r["status"] == "to-check"]
-    fail_rows = [r for r in joined if r["status"] == "urlbroken"]
-    nodate_rows = [r for r in joined if r["status"] == "no-dates"]
-    cleared_rows = [r for r in joined if r["status"] == "cleared"]
-    log.info(
-        "Diff complete: %d gaps, %d URL failures, %d no-dates, %d cleared",
-        len(gap_rows), len(fail_rows), len(nodate_rows), len(cleared_rows),
-    )
-    log.info(
-        "Source coverage: %d IR-only, %d SEC-only, %d both (SEC lifted %d companies from silence)",
-        ir_only, sec_only, both_sources, sec_only,
-    )
+    fail_rows = [r for r in joined if r["status"] in ("urlbroken", "needs_fix", "orphan")]
 
     # --- 6. Write gaps.json for the artifact -------------------------------
     write_gaps_json(joined, cfg.repo_root, today)
