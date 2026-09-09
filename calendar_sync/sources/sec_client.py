@@ -79,6 +79,19 @@ _WORDY_PERIOD = {"first quarter":"Q1","second quarter":"Q2","third quarter":"Q3"
                  "half-year":"H1","half year":"H1","full-year":"FY","full year":"FY",
                  "nine-month":"Q3","nine month":"Q3","1h":"H1","2h":"H2"}
 
+# Phrases that mean the date is a *period boundary* (not an announcement date).
+# We check the ~80 chars immediately preceding the date match.
+_PERIOD_BOUNDARY = re.compile(
+    r"(?:period|quarter|half[- ]?year|fiscal[- ]?year|fiscal|year|"
+    r"three\s+months?|six\s+months?|nine\s+months?|twelve\s+months?)\s+"
+    r"end(?:ed|ing)?\s*[:,]?\s*$"
+    r"|(?:as\s+(?:at|of)|ended|ending|through|thru)\s*$"
+    r"|balance\s+sheet\s+(?:at|as\s+of)?\s*$",
+    re.I,
+)
+
+MIN_FUTURE_DAYS = 3  # never emit a date fewer than N days out (filing-date FPs)
+
 _LEGAL_SUFFIX = re.compile(
     r"\b(?:inc|inc\.|incorporated|corp|corp\.|corporation|co|co\.|company|"
     r"ltd|ltd\.|limited|plc|nv|n\.v\.|sa|s\.a\.|se|ag|ab|kgaa|holdings|"
@@ -128,7 +141,9 @@ def match_ciks(joined: List[dict], by_norm: Dict[str, dict]) -> Dict[str, str]:
 
 
 def _extract_events_from_text(text: str, today: date, horizon: date) -> List[dict]:
-    """Return list of {date: date, title: str} — dates in [today, horizon] with a trigger phrase nearby."""
+    """Return list of {date: date, title: str} — dates in [today+MIN_FUTURE_DAYS, horizon]
+    with a trigger phrase nearby, rejecting period-boundary references."""
+    min_date = today + timedelta(days=MIN_FUTURE_DAYS)
     out: List[dict] = []
     seen: set = set()
     for pat, kind in _DATE_PATTERNS:
@@ -146,7 +161,11 @@ def _extract_events_from_text(text: str, today: date, horizon: date) -> List[dic
                 dt = date(y, mo, d)
             except (KeyError, ValueError):
                 continue
-            if dt < today or dt > horizon or dt in seen:
+            if dt < min_date or dt > horizon or dt in seen:
+                continue
+            # Reject period-boundary references: "quarter ended September 30, 2026"
+            prefix = text[max(0, m.start()-80):m.start()]
+            if _PERIOD_BOUNDARY.search(prefix):
                 continue
             window = text[max(0, m.start()-250):min(len(text), m.end()+250)]
             if not _TRIGGERS.search(window):
