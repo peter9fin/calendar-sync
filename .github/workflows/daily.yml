@@ -43,7 +43,15 @@ jobs:
           pip install -r requirements.txt
 
       - name: Install Playwright Chromium
-        run: python -m playwright install --with-deps chromium
+        run: |
+          # Retry install of chromium (without --with-deps to avoid the flaky
+          # dl.google.com apt repo). Runner image already carries the shared
+          # libs Chromium needs.
+          for i in 1 2 3; do
+            python -m playwright install chromium && break
+            echo "playwright install attempt $i failed; retrying in 10s..."
+            sleep 10
+          done
 
       - name: Restore 9fin session cookies
         env:
